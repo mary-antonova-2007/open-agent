@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
 
     admin_telegram_user_id: int | None = Field(default=None)
     admin_full_name: str = "System Admin"
+
+    @field_validator("admin_telegram_user_id", mode="before")
+    @classmethod
+    def empty_admin_telegram_user_id_is_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
 
 
 @lru_cache
