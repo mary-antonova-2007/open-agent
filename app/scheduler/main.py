@@ -19,16 +19,18 @@ async def enqueue_due_reminders() -> None:
             .where(
                 Reminder.status == "scheduled",
                 Reminder.delivery_channel == "telegram",
-                Reminder.remind_at <= datetime.now(UTC),
             )
             .order_by(Reminder.remind_at)
-            .limit(50)
+            .limit(200)
         )
+        now = datetime.now(UTC)
         reminders = list((await session.scalars(stmt)).all())
         for reminder in reminders:
             task = await session.get(Task, reminder.task_id) if reminder.task_id else None
             if task is not None and task.status in {"done", "cancelled", "archived"}:
                 reminder.status = "cancelled"
+                continue
+            if reminder.remind_at > now:
                 continue
             reminder.status = "queued"
             send_telegram_reminder.send(reminder.id)
