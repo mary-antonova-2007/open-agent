@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -9,6 +10,8 @@ from app.agents.orchestrator import AgentOrchestrator
 from app.application.employee_service import EmployeeService
 from app.infrastructure.idempotency import IdempotencyStore, MemoryIdempotencyStore
 from app.infrastructure.db.models import ChatMessage, ChatSession
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramUpdateService:
@@ -42,6 +45,16 @@ class TelegramUpdateService:
             int(telegram_user_id)
         )
         if employee is None:
+            logger.warning(
+                "Unauthorized Telegram user attempted access: telegram_user_id=%s username=%s full_name=%s",
+                telegram_user_id,
+                from_user.get("username"),
+                " ".join(
+                    part
+                    for part in [from_user.get("first_name"), from_user.get("last_name")]
+                    if part
+                ),
+            )
             return "unauthorized"
         session = await self._get_or_create_session(
             telegram_chat_id=int(telegram_chat_id or telegram_user_id), employee_id=employee.id

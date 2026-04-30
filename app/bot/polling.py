@@ -25,7 +25,10 @@ async def handle_message(message: Message) -> None:
         )
         await session.commit()
     if result == "unauthorized":
-        await message.answer("Вы не зарегистрированы в системе. Обратитесь к администратору.")
+        await message.answer(
+            "Вы не зарегистрированы в системе. "
+            f"Передайте администратору ваш Telegram ID: {message.from_user.id}."
+        )
         return
     if result == "duplicate":
         return
