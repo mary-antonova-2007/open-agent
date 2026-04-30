@@ -1,0 +1,104 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    command: uvicorn app.api.main:create_app --factory --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: .
+    env_file: .env
+    command: dramatiq app.workers.tasks
+    depends_on:
+      - postgres
+      - redis
+
+  scheduler:
+    build: .
+    env_file: .env
+    command: python -m app.scheduler.main
+    depends_on:
+      - postgres
+      - redis
+
+  bot-worker:
+    build: .
+    env_file: .env
+    command: python -m app.bot.polling
+    profiles: ["dev-bot"]
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: openagentcrm
+      POSTGRES_USER: openagent
+      POSTGRES_PASSWORD: openagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openagent -d openagentcrm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  adminer:
+    image: adminer:4
+    profiles: ["dev"]
+    ports:
+      - "8081:8080"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  minio-data:
