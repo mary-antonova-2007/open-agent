@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 
 from datetime import UTC, datetime
@@ -79,18 +80,20 @@ class AgentOrchestrator:
                 "что мне сделать",
                 "мои задачи",
                 "список задач",
+                "покажи задачи",
+                "покажи мои задачи",
+                "какие задачи",
+                "какие у меня задачи",
                 "что у меня",
+                "что напоминал",
+                "что я просил",
+                "просил напомнить",
             )
         ):
             return "task_list"
-        if any(
-            word in normalized
-            for word in (
-                "напомни",
-                "создай задачу",
-                "поставь задачу",
-                "запланируй",
-            )
+        if re.search(
+            r"\b(напомни( мне)?|создай задачу|поставь задачу|запланируй)\b",
+            normalized,
         ):
             return "task"
         if any(
