@@ -20,7 +20,9 @@ async def handle_message(message: Message) -> None:
             session=session,
             orchestrator=AgentOrchestrator(session),
         )
-        result = await service.handle_update({"message": message.model_dump(mode="json")})
+        result = await service.handle_update(
+            {"message": message.model_dump(mode="json", by_alias=True)}
+        )
         await session.commit()
     if result == "unauthorized":
         await message.answer("Вы не зарегистрированы в системе. Обратитесь к администратору.")
