@@ -54,10 +54,10 @@ class TelegramUpdateService:
                 telegram_message_id=message.get("message_id"),
             )
         )
-        await self.orchestrator.handle_text(
+        response = await self.orchestrator.handle_text(
             employee=employee, text=text, source="telegram", session_id=session.id
         )
-        return "ok"
+        return response
 
     async def _get_or_create_session(
         self, *, telegram_chat_id: int, employee_id: int
