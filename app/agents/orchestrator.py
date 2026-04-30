@@ -5,6 +5,7 @@ import uuid
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.state import AgentState
@@ -12,7 +13,7 @@ from app.application.audit_service import AuditService
 from app.application.permissions import PermissionDeniedError
 from app.application.schemas import EmployeeContext
 from app.core.config import get_settings
-from app.infrastructure.db.models import AgentRun, ChatSession
+from app.infrastructure.db.models import AgentRun, ChatMessage as DbChatMessage, ChatSession
 from app.infrastructure.llm import ChatMessage, LLMClientError, OpenAICompatibleLLMClient
 from app.tools.defaults import build_tool_registry
 
@@ -35,12 +36,14 @@ class AgentOrchestrator:
     ) -> str:
         original_text = text
         chat_session = await self._load_chat_session(session_id)
+        conversation_context = await self._load_conversation_context(session_id)
         text = self._apply_pending_context(text, chat_session)
         state = AgentState(
             employee=employee,
             text=text,
             source=source,
             trace_id=uuid.uuid4().hex,
+            context={"conversation": conversation_context},
         )
         state.route = self._route(text)
         state.response = await self._response_for_route(state)
@@ -145,19 +148,21 @@ class AgentOrchestrator:
             "компании, мягко попроси уточнить контекст. Если пользователь просит "
             "создать задачу, напоминание, изменить данные, файл или договор, не "
             "притворяйся что сделал это в чате: такие действия выполняются только "
-            "через безопасный tool-flow."
+            "через безопасный tool-flow. Ниже может быть история текущего чата; "
+            "используй ее, когда пользователь спрашивает, что он говорил раньше, "
+            "о чем был разговор или что было в предыдущем сообщении."
+        )
+        conversation_context = str(state.context.get("conversation") or "").strip()
+        user_content = (
+            f"Сотрудник: {state.employee.full_name}.\n"
+            f"История текущего чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
+            f"Текущее сообщение: {state.text}"
         )
         try:
             response = await self.llm_client.chat(
                 [
                     ChatMessage(role="system", content=system_prompt),
-                    ChatMessage(
-                        role="user",
-                        content=(
-                            f"Сотрудник: {state.employee.full_name}. "
-                            f"Сообщение: {state.text}"
-                        ),
-                    ),
+                    ChatMessage(role="user", content=user_content),
                 ],
                 temperature=0.2,
                 max_tokens=self.settings.llm_max_tokens,
@@ -227,6 +232,26 @@ class AgentOrchestrator:
         if session_id is None:
             return None
         return await self.session.get(ChatSession, session_id)
+
+    async def _load_conversation_context(self, session_id: int | None, limit: int = 20) -> str:
+        if session_id is None:
+            return ""
+        stmt = (
+            select(DbChatMessage)
+            .where(DbChatMessage.session_id == session_id)
+            .order_by(DbChatMessage.id.desc())
+            .limit(limit)
+        )
+        rows = list((await self.session.scalars(stmt)).all())
+        rows.reverse()
+        lines = []
+        for row in rows:
+            text = (row.message_text or "").strip()
+            if not text:
+                continue
+            speaker = "Сотрудник" if row.direction == "in" else "Агент"
+            lines.append(f"{speaker}: {text}")
+        return "\n".join(lines)
 
     def _apply_pending_context(self, text: str, chat_session: ChatSession | None) -> str:
         if chat_session is None:
