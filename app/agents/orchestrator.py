@@ -11,7 +11,7 @@ from app.application.audit_service import AuditService
 from app.application.permissions import PermissionDeniedError
 from app.application.schemas import EmployeeContext
 from app.core.config import get_settings
-from app.infrastructure.db.models import AgentRun
+from app.infrastructure.db.models import AgentRun, ChatSession
 from app.infrastructure.llm import ChatMessage, LLMClientError, OpenAICompatibleLLMClient
 from app.tools.defaults import build_tool_registry
 
@@ -32,6 +32,9 @@ class AgentOrchestrator:
     async def handle_text(
         self, *, employee: EmployeeContext, text: str, source: str, session_id: int | None = None
     ) -> str:
+        original_text = text
+        chat_session = await self._load_chat_session(session_id)
+        text = self._apply_pending_context(text, chat_session)
         state = AgentState(
             employee=employee,
             text=text,
@@ -40,6 +43,11 @@ class AgentOrchestrator:
         )
         state.route = self._route(text)
         state.response = await self._response_for_route(state)
+        self._update_session_state(
+            chat_session=chat_session,
+            state=state,
+            original_text=original_text,
+        )
         run = AgentRun(
             trace_id=state.trace_id,
             employee_id=employee.id,
@@ -64,7 +72,26 @@ class AgentOrchestrator:
     @staticmethod
     def _route(text: str) -> str:
         normalized = text.lower()
-        if any(word in normalized for word in ("задач", "напомни", "сделать")):
+        if any(
+            phrase in normalized
+            for phrase in (
+                "что я должен сделать",
+                "что мне сделать",
+                "мои задачи",
+                "список задач",
+                "что у меня",
+            )
+        ):
+            return "task_list"
+        if any(
+            word in normalized
+            for word in (
+                "напомни",
+                "создай задачу",
+                "поставь задачу",
+                "запланируй",
+            )
+        ):
             return "task"
         if any(
             word in normalized
@@ -76,6 +103,8 @@ class AgentOrchestrator:
     async def _response_for_route(self, state: AgentState) -> str:
         if state.route == "task":
             return await self._handle_task_route(state)
+        if state.route == "task_list":
+            return await self._handle_task_list_route(state)
         if state.route == "knowledge":
             return (
                 "Вопрос по базе знаний распознан. RAG будет "
@@ -103,7 +132,7 @@ class AgentOrchestrator:
                     ),
                 ],
                 temperature=0.2,
-                max_tokens=128,
+                max_tokens=self.settings.llm_max_tokens,
             )
         except LLMClientError:
             return (
@@ -124,12 +153,17 @@ class AgentOrchestrator:
         except PermissionDeniedError:
             return "У вас нет прав на создание задач."
         if result.ok:
+            state.context["task_created"] = True
             tasks = result.data.get("tasks", [])
             if len(tasks) == 1:
                 title = tasks[0].get("title", "задача")
+                reminder = tasks[0].get("reminder_at")
+                if reminder:
+                    return f"Создал задачу: {title}. Напоминание: {reminder}."
                 return f"Создал задачу: {title}."
             return f"Создал задач: {len(tasks)}."
         if result.code == "ambiguous":
+            state.context["task_ambiguous"] = True
             return (
                 "Нужно уточнить дату или время задачи. "
                 "Напишите конкретный день и время."
@@ -137,3 +171,80 @@ class AgentOrchestrator:
         return result.message or (
             "Не удалось создать задачу из сообщения."
         )
+
+    async def _handle_task_list_route(self, state: AgentState) -> str:
+        registry = build_tool_registry(self.session)
+        try:
+            result = await registry.execute(
+                name="list_my_tasks",
+                actor=state.employee,
+                payload={},
+                trace_id=state.trace_id,
+            )
+        except PermissionDeniedError:
+            return "У вас нет прав на просмотр задач."
+        tasks = result.data.get("tasks", []) if result.ok else []
+        if not tasks:
+            return "Открытых задач сейчас нет."
+        lines = ["Ваши открытые задачи:"]
+        for index, task in enumerate(tasks[:10], start=1):
+            title = task.get("title", "Задача")
+            status = task.get("status", "open")
+            reminder = task.get("reminder_at") or task.get("due_at")
+            suffix = f" ({reminder})" if reminder else ""
+            lines.append(f"{index}. {title} - {status}{suffix}")
+        return "\n".join(lines)
+
+    async def _load_chat_session(self, session_id: int | None) -> ChatSession | None:
+        if session_id is None:
+            return None
+        return await self.session.get(ChatSession, session_id)
+
+    def _apply_pending_context(self, text: str, chat_session: ChatSession | None) -> str:
+        if chat_session is None:
+            return text
+        pending_task = (chat_session.state or {}).get("pending_task")
+        if not pending_task:
+            return text
+        if not self._looks_like_clarification(text):
+            return text
+        original_text = str(pending_task.get("text") or "").strip()
+        return f"{original_text} {text}".strip() if original_text else text
+
+    @staticmethod
+    def _looks_like_clarification(text: str) -> bool:
+        normalized = text.lower().strip()
+        return any(
+            token in normalized
+            for token in (
+                "сегодня",
+                "завтра",
+                "понедельник",
+                "вторник",
+                "сред",
+                "четверг",
+                "пятниц",
+                "суббот",
+                "воскрес",
+            )
+        )
+
+    def _update_session_state(
+        self,
+        *,
+        chat_session: ChatSession | None,
+        state: AgentState,
+        original_text: str,
+    ) -> None:
+        if chat_session is None:
+            return
+        current_state = dict(chat_session.state or {})
+        if state.context.get("task_ambiguous"):
+            current_state["pending_task"] = {
+                "text": state.text,
+                "trace_id": state.trace_id,
+            }
+        elif state.context.get("task_created") or state.route != "chat":
+            current_state.pop("pending_task", None)
+        current_state["last_user_text"] = original_text
+        chat_session.state = current_state

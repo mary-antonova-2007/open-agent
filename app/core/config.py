@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     llm_api_key: str = "local-dev-key"
     llm_model: str = "local-model"
     llm_timeout_seconds: float = 120.0
+    llm_max_tokens: int = 20_000
     embedding_model: str = "local-embedding-model"
 
     admin_telegram_user_id: int | None = Field(default=None)
