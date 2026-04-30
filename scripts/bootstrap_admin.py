@@ -85,9 +85,10 @@ async def main() -> None:
                     full_name,
                     role_id,
                     department_id,
+                    timezone,
                     is_active
                 )
-                select :telegram_user_id, :full_name, r.id, d.id, true
+                select :telegram_user_id, :full_name, r.id, d.id, :timezone, true
                 from roles r
                 cross join departments d
                 where r.name=:role and d.name=:department
@@ -95,12 +96,14 @@ async def main() -> None:
                     full_name=excluded.full_name,
                     role_id=excluded.role_id,
                     department_id=excluded.department_id,
+                    timezone=excluded.timezone,
                     is_active=true
                 """
             ),
             {
                 "telegram_user_id": settings.admin_telegram_user_id,
                 "full_name": settings.admin_full_name,
+                "timezone": "Europe/Moscow",
                 "role": "admin",
                 "department": "Admin",
             },
