@@ -36,6 +36,7 @@ dev = [
     "polyfactory>=2.16,<3",
     "pytest>=8.2,<9",
     "pytest-asyncio>=0.23,<1",
+    "respx>=0.21,<1",
     "ruff>=0.5,<1",
     "testcontainers>=4.7,<5",
 ]

@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "local-dev-key"
     llm_model: str = "local-model"
+    llm_timeout_seconds: float = 120.0
     embedding_model: str = "local-embedding-model"
 
     admin_telegram_user_id: int | None = Field(default=None)

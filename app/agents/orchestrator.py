@@ -10,7 +10,9 @@ from app.agents.state import AgentState
 from app.application.audit_service import AuditService
 from app.application.permissions import PermissionDeniedError
 from app.application.schemas import EmployeeContext
+from app.core.config import get_settings
 from app.infrastructure.db.models import AgentRun
+from app.infrastructure.llm import ChatMessage, LLMClientError, OpenAICompatibleLLMClient
 from app.tools.defaults import build_tool_registry
 
 
@@ -24,6 +26,8 @@ class AgentOrchestrator:
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.settings = get_settings()
+        self.llm_client = OpenAICompatibleLLMClient()
 
     async def handle_text(
         self, *, employee: EmployeeContext, text: str, source: str, session_id: int | None = None
@@ -42,7 +46,7 @@ class AgentOrchestrator:
             session_id=session_id,
             status="succeeded",
             route=state.route,
-            model=None,
+            model=self.settings.llm_model if state.route == "chat" else None,
             finished_at=datetime.now(UTC),
         )
         self.session.add(run)
@@ -77,7 +81,36 @@ class AgentOrchestrator:
                 "Вопрос по базе знаний распознан. RAG будет "
                 "применен с учетом прав доступа."
             )
-        return "Запрос принят и записан в audit log."
+        return await self._handle_chat_route(state)
+
+    async def _handle_chat_route(self, state: AgentState) -> str:
+        system_prompt = (
+            "Ты внутренний AI Agent компании. Отвечай кратко, по-русски, "
+            "без выполнения действий. Если пользователь просит создать задачу, "
+            "напоминание, изменить данные, файл или договор, скажи, что запрос "
+            "нужно обработать через безопасный tool-flow."
+        )
+        try:
+            response = await self.llm_client.chat(
+                [
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"Сотрудник: {state.employee.full_name}. "
+                            f"Сообщение: {state.text}"
+                        ),
+                    ),
+                ],
+                temperature=0.2,
+                max_tokens=128,
+            )
+        except LLMClientError:
+            return (
+                "Запрос принят и записан в audit log. "
+                "LLM endpoint сейчас недоступен."
+            )
+        return response or "Запрос принят и записан в audit log."
 
     async def _handle_task_route(self, state: AgentState) -> str:
         registry = build_tool_registry(self.session)
