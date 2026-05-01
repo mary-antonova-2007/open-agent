@@ -24,6 +24,7 @@ DEFAULT_PERMISSIONS = [
     "file.read",
     "file.write",
     "file.archive",
+    "agent_instruction.read",
 ]
 
 

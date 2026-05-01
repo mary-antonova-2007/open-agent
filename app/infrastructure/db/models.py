@@ -308,6 +308,21 @@ class DocumentChunk(Base, TimestampMixin):
     metadata_: Mapped[JsonDict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
 
 
+class AgentInstruction(Base, TimestampMixin):
+    __tablename__ = "agent_instructions"
+    __table_args__ = (
+        Index("ix_agent_instructions_scope_status_priority", "scope", "status", "priority"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    scope: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), default="approved", nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_: Mapped[JsonDict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
+
+
 class ChatSession(Base, TimestampMixin):
     __tablename__ = "chat_sessions"
 
