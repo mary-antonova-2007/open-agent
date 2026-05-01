@@ -57,11 +57,11 @@ class AgentOrchestrator:
             },
         )
         state.context["intent"] = await self._decide_intent(state)
-        if self._is_pending_file_instruction(state):
+        if self._is_pending_file_instruction(state) or self._is_file_list_request(state.text):
             state.context["intent"] = {
                 **state.context["intent"],
                 "route": "file_action",
-                "reason": "pending_file_workflow_guard",
+                "reason": "file_workflow_guard",
             }
         state.route = str(state.context["intent"].get("route") or "chat")
         state.response = await self._response_for_route(state)
@@ -113,7 +113,9 @@ class AgentOrchestrator:
             "Даже если в тексте есть слова 'договор', 'проект', 'изделие', это не "
             "поиск сущности, а классификация уже загруженного файла.\n\n"
             "Если сотрудник просит 'скинь файл', 'пришли документ', 'отправь файл' "
-            "или спрашивает структуру папок, тоже выбери route=file_action.\n\n"
+            "или спрашивает структуру папок, тоже выбери route=file_action. "
+            "Фразы 'какие файлы хранятся', 'что лежит на диске', 'покажи файлы', "
+            "'список файлов' тоже всегда route=file_action.\n\n"
             "Для route=entity выбери tool_name:\n"
             "- search_counterparties\n"
             "- search_projects\n"
@@ -202,6 +204,15 @@ class AgentOrchestrator:
                 "замер",
                 "модель",
             )
+        )
+
+    @staticmethod
+    def _is_file_list_request(text: str) -> bool:
+        normalized = text.lower()
+        return (
+            ("файл" in normalized and any(word in normalized for word in ("какие", "есть", "хранят", "покажи", "список")))
+            or "что лежит на диске" in normalized
+            or "структура папок" in normalized
         )
 
     async def _response_for_route(self, state: AgentState) -> str:
