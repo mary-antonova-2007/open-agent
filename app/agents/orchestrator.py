@@ -237,7 +237,11 @@ class AgentOrchestrator:
         file_service = FileService(self.session)
 
         lowered = state.text.lower()
-        if "структур" in lowered or "папк" in lowered:
+        if (
+            "структур" in lowered
+            or "папк" in lowered
+            or ("файл" in lowered and any(word in lowered for word in ("какие", "есть", "хранят")))
+        ):
             tree = file_service.list_storage_tree()
             if not tree:
                 return "Файловая структура пока пустая. Чистый лист, только без романтики."

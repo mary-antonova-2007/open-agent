@@ -50,6 +50,37 @@ async def handle_message(message: Message) -> None:
 async def handle_document(message: Message, bot: Bot) -> None:
     if message.from_user is None or message.document is None:
         return
+    await save_incoming_file(
+        message=message,
+        bot=bot,
+        telegram_file_id=message.document.file_id,
+        original_filename=message.document.file_name or "telegram_file",
+        mime_type=message.document.mime_type,
+    )
+
+
+@router.message(F.photo)
+async def handle_photo(message: Message, bot: Bot) -> None:
+    if message.from_user is None or not message.photo:
+        return
+    photo = message.photo[-1]
+    await save_incoming_file(
+        message=message,
+        bot=bot,
+        telegram_file_id=photo.file_id,
+        original_filename=f"photo_{photo.file_unique_id}.jpg",
+        mime_type="image/jpeg",
+    )
+
+
+async def save_incoming_file(
+    *,
+    message: Message,
+    bot: Bot,
+    telegram_file_id: str,
+    original_filename: str,
+    mime_type: str | None,
+) -> None:
     async with async_session_factory() as session:
         employee = await EmployeeService(session).get_by_telegram_user_id(message.from_user.id)
         if employee is None:
@@ -66,15 +97,15 @@ async def handle_document(message: Message, bot: Bot) -> None:
             telegram_chat_id=message.chat.id,
             employee_id=employee.id,
         )
-        telegram_file = await bot.get_file(message.document.file_id)
+        telegram_file = await bot.get_file(telegram_file_id)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            local_tmp = Path(tmp_dir) / (message.document.file_name or "telegram_file")
+            local_tmp = Path(tmp_dir) / original_filename
             await bot.download_file(telegram_file.file_path, destination=local_tmp)
             stored = await FileService(session).save_inbox_file(
                 employee,
                 source_path=local_tmp,
-                original_filename=message.document.file_name or "telegram_file",
-                mime_type=message.document.mime_type,
+                original_filename=original_filename,
+                mime_type=mime_type,
             )
         state = dict(chat_session.state or {})
         state["pending_file"] = {
