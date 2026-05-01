@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_secure: bool = False
     minio_bucket_files: str = "company-files"
+    local_file_storage_root: str = "/data/company-files"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "company_knowledge"

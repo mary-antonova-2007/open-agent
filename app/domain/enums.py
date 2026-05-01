@@ -17,6 +17,7 @@ class EntityType(StrEnum):
     item = "item"
     document = "document"
     file = "file"
+    personal = "personal"
     task = "task"
 
 

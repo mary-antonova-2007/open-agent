@@ -12,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.state import AgentState
 from app.application.audit_service import AuditService
+from app.application.entity_service import EntityService
+from app.application.file_service import FileService
 from app.application.permissions import PermissionDeniedError
 from app.application.schemas import EmployeeContext
 from app.core.config import get_settings
+from app.domain.enums import EntityType
 from app.infrastructure.db.models import AgentRun, ChatMessage as DbChatMessage, ChatSession
 from app.infrastructure.llm import ChatMessage, LLMClientError, OpenAICompatibleLLMClient
 from app.tools.defaults import build_tool_registry
@@ -40,6 +43,7 @@ class AgentOrchestrator:
         chat_session = await self._load_chat_session(session_id)
         conversation_context = await self._load_conversation_context(session_id)
         text = self._apply_pending_context(text, chat_session)
+        pending_file = (chat_session.state or {}).get("pending_file") if chat_session else None
         state = AgentState(
             employee=employee,
             text=text,
@@ -48,6 +52,8 @@ class AgentOrchestrator:
             context={
                 "conversation": conversation_context,
                 "current_time": self._current_time_context(employee),
+                "session_id": session_id,
+                "pending_file": pending_file,
             },
         )
         state.context["intent"] = await self._decide_intent(state)
@@ -90,6 +96,8 @@ class AgentOrchestrator:
             "- chat: обычный разговор или общий вопрос\n"
             "- conversation_memory: вопрос о текущей истории чата\n"
             "- current_time: вопрос о текущем времени/дате\n"
+            "- file_action: пользователь объясняет, что делать с загруженным файлом, "
+            "просит структуру папок или ищет файл\n"
             "- task: создать задачу/напоминание из естественного языка\n"
             "- task_list: показать открытые задачи сотрудника\n"
             "- entity: поиск/показ CRM-сущностей или памяти сущности\n"
@@ -105,12 +113,15 @@ class AgentOrchestrator:
             "'все договоры' или 'какие есть договоры', query должен быть пустой строкой. "
             "Если сотрудник спрашивает 'сколько времени', 'какое сейчас время' "
             "или 'какая дата', выбери route=current_time. Для обычного разговора "
+            "Если в истории/контексте есть pending_file и пользователь объясняет, "
+            "что это за документ, выбери route=file_action. "
             "query пустой. Верни JSON строго такого вида: "
             "{\"route\":\"...\",\"tool_name\":null,\"query\":\"\",\"reason\":\"...\"}."
         )
         user_content = (
             f"Сотрудник: {state.employee.full_name}\n"
             f"Backend current_time: {state.context.get('current_time')}\n"
+            f"Pending file: {state.context.get('pending_file')}\n"
             f"История чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
             f"Последнее сообщение: {state.text}"
         )
@@ -130,6 +141,7 @@ class AgentOrchestrator:
             "chat",
             "conversation_memory",
             "current_time",
+            "file_action",
             "task",
             "task_list",
             "entity",
@@ -167,6 +179,8 @@ class AgentOrchestrator:
             return await self._handle_conversation_memory_route(state)
         if state.route == "current_time":
             return self._handle_current_time_route(state)
+        if state.route == "file_action":
+            return await self._handle_file_action_route(state)
         if state.route == "entity":
             return await self._handle_entity_route(state)
         if state.route == "knowledge":
@@ -182,6 +196,164 @@ class AgentOrchestrator:
             f"Сейчас {current_time.get('local_human')} "
             f"({current_time.get('timezone')}). Без фантазий, это время backend."
         )
+
+    async def _handle_file_action_route(self, state: AgentState) -> str:
+        chat_session = await self._load_chat_session(state.context.get("session_id"))
+        pending_file = (chat_session.state or {}).get("pending_file") if chat_session else None
+        file_service = FileService(self.session)
+
+        lowered = state.text.lower()
+        if "структур" in lowered or "папк" in lowered:
+            tree = file_service.list_storage_tree()
+            if not tree:
+                return "Файловая структура пока пустая. Чистый лист, только без романтики."
+            return "Текущая структура файлов:\n" + "\n".join(f"- {entry}" for entry in tree[:80])
+
+        if not pending_file:
+            return (
+                "Файл для обработки сейчас не выбран. Пришли документ в Telegram, "
+                "я сохраню его в Inbox и спрошу, куда его положить."
+            )
+
+        instruction = await self._classify_file_instruction(state, pending_file)
+        entity = await self._resolve_file_entity(state.employee, instruction)
+        if entity is None:
+            return (
+                "Я понял описание файла, но не нашел подходящий проект/договор/изделие в базе. "
+                "Сначала создай или уточни сущность, а файл пока лежит в Inbox."
+            )
+
+        display_name = self._build_document_filename(instruction)
+        version = await file_service.move_inbox_file_to_entity(
+            state.employee,
+            file_object_id=int(pending_file["file_object_id"]),
+            entity_type=entity["entity_type"],
+            entity_id=entity["entity_id"],
+            file_type=instruction["file_type"],
+            display_name=display_name,
+            project_title=entity.get("project_title") or instruction.get("project"),
+            contract_title=entity.get("contract_title") or instruction.get("contract"),
+            item_title=entity.get("item_title") or instruction.get("item"),
+            trace_id=state.trace_id,
+        )
+        if version is None:
+            return "Не смог переместить файл: запись или файл на диске не найдены. Inbox, кажется, обиделся."
+        if chat_session is not None:
+            current_state = dict(chat_session.state or {})
+            current_state.pop("pending_file", None)
+            chat_session.state = current_state
+        return (
+            f"Готово. Переложил файл как «{display_name}».\n"
+            f"Путь: {version.object_key}"
+        )
+
+    async def _classify_file_instruction(self, state: AgentState, pending_file: dict) -> dict:
+        system_prompt = (
+            "Ты классифицируешь файл для внутреннего файлового агента. "
+            "Верни только JSON без markdown. file_type выбери из: "
+            "contract, measurement, kdz, kdp, info, model. "
+            "doc_type - человекочитаемый тип документа: Договор, Замер, КДЗ, КДП, Info, Model. "
+            "Извлеки project, contract, contract_number, item, document_date в формате YYYY-MM-DD, "
+            "если они есть. Если данных нет, ставь null."
+        )
+        user_content = (
+            f"Исходное имя файла: {pending_file.get('display_name')}\n"
+            f"Инструкция пользователя: {state.text}\n"
+            "JSON schema: {\"file_type\":\"contract|measurement|kdz|kdp|info|model\","
+            "\"doc_type\":\"...\",\"project\":null,\"contract\":null,"
+            "\"contract_number\":null,\"item\":null,\"document_date\":null}"
+        )
+        try:
+            raw = await self.llm_client.chat(
+                [
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=user_content),
+                ],
+                temperature=0,
+                max_tokens=700,
+            )
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            data = json.loads(match.group(0) if match else raw)
+        except (LLMClientError, json.JSONDecodeError, AttributeError):
+            data = {}
+        file_type = str(data.get("file_type") or "info").lower()
+        if file_type not in {"contract", "measurement", "kdz", "kdp", "info", "model"}:
+            file_type = "info"
+        return {
+            "file_type": file_type,
+            "doc_type": str(data.get("doc_type") or self._default_doc_type(file_type)),
+            "project": data.get("project"),
+            "contract": data.get("contract"),
+            "contract_number": data.get("contract_number"),
+            "item": data.get("item"),
+            "document_date": data.get("document_date"),
+            "original_name": pending_file.get("display_name") or "file",
+        }
+
+    async def _resolve_file_entity(
+        self, actor: EmployeeContext, instruction: dict
+    ) -> dict | None:
+        entity_service = EntityService(self.session)
+        project_title = instruction.get("project")
+        contract_query = instruction.get("contract") or instruction.get("contract_number")
+        item_query = instruction.get("item")
+        if item_query:
+            items = await entity_service.search_items(actor, str(item_query), limit=2)
+            if len(items) == 1:
+                return {
+                    "entity_type": EntityType.item,
+                    "entity_id": items[0].id,
+                    "item_title": items[0].name,
+                    "contract_title": contract_query,
+                    "project_title": project_title,
+                }
+        if contract_query:
+            contracts = await entity_service.search_contracts(actor, str(contract_query), limit=2)
+            if len(contracts) == 1:
+                return {
+                    "entity_type": EntityType.contract,
+                    "entity_id": contracts[0].id,
+                    "contract_title": contracts[0].title,
+                    "project_title": project_title,
+                }
+        if project_title:
+            projects = await entity_service.search_projects(actor, str(project_title), limit=2)
+            if len(projects) == 1:
+                return {
+                    "entity_type": EntityType.project,
+                    "entity_id": projects[0].id,
+                    "project_title": projects[0].title,
+                }
+        return {"entity_type": EntityType.personal, "entity_id": actor.id, "project_title": "Личные файлы"}
+
+    @staticmethod
+    def _build_document_filename(instruction: dict) -> str:
+        original = str(instruction.get("original_name") or "file")
+        extension = ""
+        if "." in original:
+            extension = "." + original.rsplit(".", 1)[1].lower()
+        parts = [
+            instruction.get("doc_type"),
+            instruction.get("project"),
+            instruction.get("contract_number") or instruction.get("contract"),
+            instruction.get("item"),
+        ]
+        date = instruction.get("document_date")
+        stem = "_".join(str(part).strip() for part in parts if part)
+        if date:
+            stem = f"{stem} (от {date})" if stem else f"Документ (от {date})"
+        return f"{stem or original.rsplit('.', 1)[0]}{extension}"
+
+    @staticmethod
+    def _default_doc_type(file_type: str) -> str:
+        return {
+            "contract": "Договор",
+            "measurement": "Замер",
+            "kdz": "КДЗ",
+            "kdp": "КДП",
+            "model": "Model",
+            "info": "Info",
+        }.get(file_type, "Info")
 
     async def _handle_conversation_memory_route(self, state: AgentState) -> str:
         conversation_context = str(state.context.get("conversation") or "").strip()
