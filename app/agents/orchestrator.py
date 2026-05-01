@@ -153,6 +153,13 @@ class AgentOrchestrator:
             return f"Предыдущее твое сообщение: «{employee_messages[-1]}»."
 
         focused = self._find_relevant_employee_messages(conversation_context, normalized)
+        without_current = [
+            message
+            for message in focused
+            if message.strip().lower() != state.text.strip().lower()
+        ]
+        if without_current:
+            focused = without_current
         if focused:
             return "Ты спрашивал/писал вот это:\n" + "\n".join(
                 f"- {message}" for message in focused[:5]
@@ -304,7 +311,7 @@ class AgentOrchestrator:
             return None
         return await self.session.get(ChatSession, session_id)
 
-    async def _load_conversation_context(self, session_id: int | None, limit: int = 20) -> str:
+    async def _load_conversation_context(self, session_id: int | None, limit: int = 80) -> str:
         if session_id is None:
             return ""
         stmt = (
@@ -377,7 +384,10 @@ class AgentOrchestrator:
         return [
             message
             for message in messages
-            if any(keyword in message.lower() for keyword in keywords)
+            if any(
+                keyword in message.lower() or keyword[:5] in message.lower()
+                for keyword in keywords
+            )
         ]
 
     def _apply_pending_context(self, text: str, chat_session: ChatSession | None) -> str:
