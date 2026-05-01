@@ -79,6 +79,23 @@ class AgentOrchestrator:
         if any(
             phrase in normalized
             for phrase in (
+                "помнишь бесед",
+                "помнишь разговор",
+                "о чем мы",
+                "о чём мы",
+                "что я сказал",
+                "что я спрашивал",
+                "о чем просил",
+                "о чём просил",
+                "что было",
+                "сообщение назад",
+                "предыдущее сообщение",
+            )
+        ):
+            return "conversation_memory"
+        if any(
+            phrase in normalized
+            for phrase in (
                 "что я должен сделать",
                 "что мне сделать",
                 "мои задачи",
@@ -111,12 +128,59 @@ class AgentOrchestrator:
             return await self._handle_task_route(state)
         if state.route == "task_list":
             return await self._handle_task_list_route(state)
+        if state.route == "conversation_memory":
+            return await self._handle_conversation_memory_route(state)
         if state.route == "knowledge":
             return (
                 "Вопрос по базе знаний распознан. RAG будет "
                 "применен с учетом прав доступа."
             )
         return await self._handle_chat_route(state)
+
+    async def _handle_conversation_memory_route(self, state: AgentState) -> str:
+        conversation_context = str(state.context.get("conversation") or "").strip()
+        if not conversation_context:
+            return (
+                "Пока в этой сессии у меня нет сохраненной истории. "
+                "Память не магия, а таблица в базе."
+            )
+
+        normalized = state.text.lower()
+        employee_messages = self._extract_employee_messages(conversation_context)
+        if any(phrase in normalized for phrase in ("сообщение назад", "предыдущее сообщение")):
+            if not employee_messages:
+                return "До этого в истории не вижу твоих сообщений."
+            return f"Предыдущее твое сообщение: «{employee_messages[-1]}»."
+
+        focused = self._find_relevant_employee_messages(conversation_context, normalized)
+        if focused:
+            return "Ты спрашивал/писал вот это:\n" + "\n".join(
+                f"- {message}" for message in focused[:5]
+            )
+
+        system_prompt = (
+            "Ты отвечаешь только по истории текущего Telegram-чата. "
+            "Не здоровайся. Не придумывай. Если пользователь спрашивает, что он "
+            "спрашивал или о чем просил, дай короткий конкретный список фактов из "
+            "истории. Не пиши 'Агент:' или 'Сотрудник:' в начале ответа."
+        )
+        user_content = (
+            f"История чата:\n{conversation_context}\n\n"
+            f"Вопрос пользователя: {state.text}\n\n"
+            "Ответь кратко и конкретно."
+        )
+        try:
+            response = await self.llm_client.chat(
+                [
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=user_content),
+                ],
+                temperature=0.2,
+                max_tokens=900,
+            )
+        except LLMClientError:
+            return "Историю вижу, но LLM endpoint сейчас недоступен для нормального резюме."
+        return self._clean_chat_response(response) or "Историю вижу, но внятный ответ сейчас не собрал."
 
     async def _handle_chat_route(self, state: AgentState) -> str:
         system_prompt = (
@@ -263,8 +327,58 @@ class AgentOrchestrator:
     @staticmethod
     def _clean_chat_response(response: str) -> str:
         cleaned = response.strip()
-        cleaned = re.sub(r"^(агент|ассистент|сотрудник)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"^(агент|ассистент|сотрудник)\s*:\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         return cleaned.strip()
+
+    @staticmethod
+    def _extract_employee_messages(conversation_context: str) -> list[str]:
+        messages: list[str] = []
+        for line in conversation_context.splitlines():
+            if line.startswith("Сотрудник:"):
+                text = line.removeprefix("Сотрудник:").strip()
+                if text:
+                    messages.append(text)
+        return messages
+
+    @staticmethod
+    def _find_relevant_employee_messages(
+        conversation_context: str,
+        normalized_question: str,
+    ) -> list[str]:
+        keywords = [
+            keyword
+            for keyword in re.findall(r"[а-яa-z0-9ё]{4,}", normalized_question)
+            if keyword
+            not in {
+                "спрашивал",
+                "спросил",
+                "просил",
+                "говорили",
+                "помнишь",
+                "сообщение",
+                "предыдущее",
+                "тебя",
+                "меня",
+                "что",
+                "какой",
+                "какая",
+                "какие",
+                "какова",
+            }
+        ]
+        if not keywords:
+            return []
+        messages = AgentOrchestrator._extract_employee_messages(conversation_context)
+        return [
+            message
+            for message in messages
+            if any(keyword in message.lower() for keyword in keywords)
+        ]
 
     def _apply_pending_context(self, text: str, chat_session: ChatSession | None) -> str:
         if chat_session is None:
