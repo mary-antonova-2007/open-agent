@@ -25,6 +25,10 @@ EMOJI_PATTERN = re.compile(
     "]+",
     flags=re.UNICODE,
 )
+SPECIAL_TOKEN_PATTERN = re.compile(r"<\|[^|]+?\|>")
+LEAKED_REASONING_PATTERN = re.compile(
+    r"(?is)^.*?(?:final answer|итоговый ответ|ответ пользователю)\s*[:：]\s*"
+)
 
 
 @dataclass(frozen=True)
@@ -86,4 +90,25 @@ class OpenAICompatibleLLMClient:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMClientError("LLM endpoint returned an invalid response") from exc
-        return EMOJI_PATTERN.sub("", str(content)).strip()
+        return sanitize_llm_text(str(content))
+
+
+def sanitize_llm_text(content: str) -> str:
+    cleaned = SPECIAL_TOKEN_PATTERN.sub("", content)
+    cleaned = LEAKED_REASONING_PATTERN.sub("", cleaned).strip()
+    cleaned = EMOJI_PATTERN.sub("", cleaned)
+    markers = (
+        "The user asks:",
+        "We need to",
+        "We should",
+        "Let's answer",
+        "Нужно ответить",
+    )
+    for marker in markers:
+        index = cleaned.find(marker)
+        if index >= 0:
+            lines = [line.strip() for line in cleaned[index:].splitlines() if line.strip()]
+            if lines:
+                cleaned = lines[-1]
+            break
+    return cleaned.strip()
