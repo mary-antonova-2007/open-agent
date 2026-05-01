@@ -11,6 +11,8 @@ from app.core.config import get_settings
 from app.infrastructure.db.session import async_session_factory
 
 router = Router()
+TELEGRAM_MESSAGE_LIMIT = 4096
+SAFE_MESSAGE_LIMIT = 3500
 
 
 @router.message(F.text | F.caption)
@@ -32,7 +34,31 @@ async def handle_message(message: Message) -> None:
         return
     if result == "duplicate":
         return
-    await message.answer(result)
+    await answer_safely(message, result)
+
+
+async def answer_safely(message: Message, text: str) -> None:
+    for chunk in split_telegram_message(text):
+        await message.answer(chunk)
+
+
+def split_telegram_message(text: str) -> list[str]:
+    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= SAFE_MESSAGE_LIMIT:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, SAFE_MESSAGE_LIMIT)
+        if split_at < SAFE_MESSAGE_LIMIT // 2:
+            split_at = remaining.rfind(" ", 0, SAFE_MESSAGE_LIMIT)
+        if split_at < SAFE_MESSAGE_LIMIT // 2:
+            split_at = SAFE_MESSAGE_LIMIT
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    return [chunk for chunk in chunks if chunk]
 
 
 async def main() -> None:

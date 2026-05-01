@@ -155,7 +155,9 @@ class AgentOrchestrator:
             "ответ с 'Агент:' или 'Сотрудник:'. Отвечай именно на текущее "
             "сообщение. Если пользователь спрашивает о прошлом разговоре, "
             "перечисли конкретные темы и просьбы из истории, а не здоровайся "
-            "заново и не отвечай общей фразой."
+            "заново и не отвечай общей фразой. По умолчанию отвечай компактно: "
+            "1-5 коротких абзацев или до 8 пунктов списка, если пользователь "
+            "сам не просит подробный разбор."
         )
         conversation_context = str(state.context.get("conversation") or "").strip()
         user_content = (
@@ -170,7 +172,7 @@ class AgentOrchestrator:
                     ChatMessage(role="user", content=user_content),
                 ],
                 temperature=0.65,
-                max_tokens=self.settings.llm_max_tokens,
+                max_tokens=min(self.settings.llm_max_tokens, 1500),
             )
         except LLMClientError:
             return (
