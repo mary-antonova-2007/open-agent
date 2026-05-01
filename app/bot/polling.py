@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.types import FSInputFile
 from aiogram.types import Message
 
 from app.agents.orchestrator import AgentOrchestrator
@@ -38,6 +39,9 @@ async def handle_message(message: Message) -> None:
         )
         return
     if result == "duplicate":
+        return
+    if result.startswith("__SEND_FILE__:"):
+        await send_file_result(message, result)
         return
     await answer_safely(message, result)
 
@@ -102,6 +106,15 @@ async def handle_document(message: Message, bot: Bot) -> None:
 async def answer_safely(message: Message, text: str) -> None:
     for chunk in split_telegram_message(text):
         await message.answer(chunk)
+
+
+async def send_file_result(message: Message, result: str) -> None:
+    first_line, _, caption = result.partition("\n")
+    path = first_line.removeprefix("__SEND_FILE__:").strip()
+    if not Path(path).exists():
+        await message.answer("Файл в базе нашел, а на диске нет. Неприятный фокус, разберусь.")
+        return
+    await message.answer_document(FSInputFile(path), caption=caption.strip() or None)
 
 
 def split_telegram_message(text: str) -> list[str]:

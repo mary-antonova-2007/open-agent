@@ -103,7 +103,7 @@ class AgentOrchestrator:
             "- conversation_memory: вопрос о текущей истории чата\n"
             "- current_time: вопрос о текущем времени/дате\n"
             "- file_action: пользователь объясняет, что делать с загруженным файлом, "
-            "просит структуру папок или ищет файл\n"
+            "просит структуру папок, ищет файл или просит скинуть/отправить файл\n"
             "- task: создать задачу/напоминание из естественного языка\n"
             "- task_list: показать открытые задачи сотрудника\n"
             "- entity: поиск/показ CRM-сущностей или памяти сущности\n"
@@ -112,6 +112,8 @@ class AgentOrchestrator:
             "описывает, что это за файл или куда его положить, route=file_action. "
             "Даже если в тексте есть слова 'договор', 'проект', 'изделие', это не "
             "поиск сущности, а классификация уже загруженного файла.\n\n"
+            "Если сотрудник просит 'скинь файл', 'пришли документ', 'отправь файл' "
+            "или спрашивает структуру папок, тоже выбери route=file_action.\n\n"
             "Для route=entity выбери tool_name:\n"
             "- search_counterparties\n"
             "- search_projects\n"
@@ -240,6 +242,12 @@ class AgentOrchestrator:
             if not tree:
                 return "Файловая структура пока пустая. Чистый лист, только без романтики."
             return "Текущая структура файлов:\n" + "\n".join(f"- {entry}" for entry in tree[:80])
+        if any(marker in lowered for marker in ("скинь", "пришли", "отправь", "дай файл")):
+            found = self._find_file_on_disk(file_service, state.text)
+            if found is None:
+                return "Не нашел подходящий файл. Он либо не загружен, либо прячется лучше, чем должен."
+            path, relative = found
+            return f"__SEND_FILE__:{path}\n{relative}"
 
         if not pending_file:
             return (
@@ -386,6 +394,33 @@ class AgentOrchestrator:
             "model": "Model",
             "info": "Info",
         }.get(file_type, "Info")
+
+    @staticmethod
+    def _find_file_on_disk(file_service: FileService, query: str) -> tuple[str, str] | None:
+        words = [
+            word
+            for word in re.findall(r"[а-яА-ЯёЁa-zA-Z0-9\-]{3,}", query.lower())
+            if word not in {"скинь", "пришли", "отправь", "файл", "документ", "найди"}
+        ]
+        candidates = [
+            entry
+            for entry in file_service.list_storage_tree(max_entries=500)
+            if "." in entry.rsplit("/", 1)[-1]
+        ]
+        if words:
+            candidates = [
+                entry
+                for entry in candidates
+                if all(word in entry.lower() for word in words[:4])
+            ] or [
+                entry
+                for entry in candidates
+                if any(word in entry.lower() for word in words[:4])
+            ]
+        if not candidates:
+            return None
+        relative = candidates[0]
+        return str(file_service.storage_root / relative), relative
 
     async def _handle_conversation_memory_route(self, state: AgentState) -> str:
         conversation_context = str(state.context.get("conversation") or "").strip()
