@@ -5,6 +5,7 @@ import re
 import uuid
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +45,10 @@ class AgentOrchestrator:
             text=text,
             source=source,
             trace_id=uuid.uuid4().hex,
-            context={"conversation": conversation_context},
+            context={
+                "conversation": conversation_context,
+                "current_time": self._current_time_context(employee),
+            },
         )
         state.context["intent"] = await self._decide_intent(state)
         state.route = str(state.context["intent"].get("route") or "chat")
@@ -85,6 +89,7 @@ class AgentOrchestrator:
             "Доступные route:\n"
             "- chat: обычный разговор или общий вопрос\n"
             "- conversation_memory: вопрос о текущей истории чата\n"
+            "- current_time: вопрос о текущем времени/дате\n"
             "- task: создать задачу/напоминание из естественного языка\n"
             "- task_list: показать открытые задачи сотрудника\n"
             "- entity: поиск/показ CRM-сущностей или памяти сущности\n"
@@ -98,11 +103,14 @@ class AgentOrchestrator:
             "- get_contract_memory\n\n"
             "Поле query - поисковая строка без служебных слов. Если сотрудник просит "
             "'все договоры' или 'какие есть договоры', query должен быть пустой строкой. "
-            "Для обычного разговора query пустой. Верни JSON строго такого вида: "
+            "Если сотрудник спрашивает 'сколько времени', 'какое сейчас время' "
+            "или 'какая дата', выбери route=current_time. Для обычного разговора "
+            "query пустой. Верни JSON строго такого вида: "
             "{\"route\":\"...\",\"tool_name\":null,\"query\":\"\",\"reason\":\"...\"}."
         )
         user_content = (
             f"Сотрудник: {state.employee.full_name}\n"
+            f"Backend current_time: {state.context.get('current_time')}\n"
             f"История чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
             f"Последнее сообщение: {state.text}"
         )
@@ -121,6 +129,7 @@ class AgentOrchestrator:
         if intent["route"] not in {
             "chat",
             "conversation_memory",
+            "current_time",
             "task",
             "task_list",
             "entity",
@@ -156,6 +165,8 @@ class AgentOrchestrator:
             return await self._handle_task_list_route(state)
         if state.route == "conversation_memory":
             return await self._handle_conversation_memory_route(state)
+        if state.route == "current_time":
+            return self._handle_current_time_route(state)
         if state.route == "entity":
             return await self._handle_entity_route(state)
         if state.route == "knowledge":
@@ -164,6 +175,13 @@ class AgentOrchestrator:
                 "применен с учетом прав доступа."
             )
         return await self._handle_chat_route(state)
+
+    def _handle_current_time_route(self, state: AgentState) -> str:
+        current_time = state.context.get("current_time") or {}
+        return (
+            f"Сейчас {current_time.get('local_human')} "
+            f"({current_time.get('timezone')}). Без фантазий, это время backend."
+        )
 
     async def _handle_conversation_memory_route(self, state: AgentState) -> str:
         conversation_context = str(state.context.get("conversation") or "").strip()
@@ -377,7 +395,9 @@ class AgentOrchestrator:
             "важнее истории: история нужна только как фон. Не отвечай на старые "
             "вопросы из истории, если текущее сообщение их не повторяет. Если "
             "пользователь просто спрашивает, как ты, отвечай как живой помощник, "
-            "а не делай выводы о времени, задачах или предыдущих ошибках."
+            "а не делай выводы о времени, задачах или предыдущих ошибках. Если "
+            "нужно упомянуть текущее время, используй только backend current_time "
+            "из сообщения пользователя, не придумывай время сам."
         )
         conversation_context = self._recent_conversation_lines(
             str(state.context.get("conversation") or ""),
@@ -385,6 +405,7 @@ class AgentOrchestrator:
         )
         user_content = (
             f"Сотрудник: {state.employee.full_name}.\n"
+            f"Backend current_time: {state.context.get('current_time')}.\n"
             f"История текущего чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
             f"Текущее сообщение: {state.text}"
         )
@@ -501,6 +522,16 @@ class AgentOrchestrator:
     def _recent_conversation_lines(conversation_context: str, *, limit: int) -> str:
         lines = [line for line in conversation_context.strip().splitlines() if line.strip()]
         return "\n".join(lines[-limit:])
+
+    @staticmethod
+    def _current_time_context(employee: EmployeeContext) -> dict[str, str]:
+        timezone = employee.timezone or "Europe/Moscow"
+        now = datetime.now(ZoneInfo(timezone))
+        return {
+            "timezone": timezone,
+            "iso": now.isoformat(timespec="seconds"),
+            "local_human": now.strftime("%Y-%m-%d %H:%M"),
+        }
 
     @staticmethod
     def _extract_entity_query(text: str) -> str:
