@@ -108,6 +108,15 @@ class AgentToolLoop:
                     route="tool",
                     tool_calls=tool_calls,
                 )
+            if tool_name in {"rename_or_move_file", "classify_and_move_pending_file"} and result.get("ok"):
+                return ToolLoopResult(
+                    response=(
+                        f"Готово. Файл теперь здесь:\n"
+                        f"{result.get('new_key') or result.get('object_key')}"
+                    ),
+                    route="tool",
+                    tool_calls=tool_calls,
+                )
             messages.append(
                 ChatMessage(
                     role="assistant",
@@ -154,6 +163,8 @@ class AgentToolLoop:
             "- list_storage_tree(): список файлов/папок на диске\n"
             "- search_files(query: string): поиск файлов по имени/пути\n"
             "- send_file(query: string): отправить найденный файл в Telegram\n"
+            "- rename_or_move_file(query: string, new_name: string|null, target_folder: string|null): "
+            "переименовать или переместить уже сохраненный файл\n"
             "- classify_and_move_pending_file(instruction: string): классифицировать pending_file, "
             "переименовать и переложить\n"
             "- search_contracts(query: string)\n"
@@ -297,6 +308,17 @@ class AgentToolLoop:
                 return {"ok": False, "error": "not_found"}
             path, relative = found
             return {"ok": True, "send_file_path": path, "caption": relative}
+        if tool_name == "rename_or_move_file":
+            result = await file_service.rename_or_move_existing_file(
+                employee,
+                query=str(args.get("query") or text),
+                new_name=args.get("new_name"),
+                target_folder=args.get("target_folder"),
+                trace_id=trace_id,
+            )
+            if result is None:
+                return {"ok": False, "error": "not_found"}
+            return {"ok": True, **result}
         if tool_name == "classify_and_move_pending_file":
             return await self._classify_and_move_pending_file(
                 employee=employee,

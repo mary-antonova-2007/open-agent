@@ -203,6 +203,77 @@ class FileService:
             entries.append(str(path.relative_to(self.storage_root)))
         return entries
 
+    async def rename_or_move_existing_file(
+        self,
+        actor: EmployeeContext,
+        *,
+        query: str,
+        new_name: str | None = None,
+        target_folder: str | None = None,
+        trace_id: str | None = None,
+    ) -> dict[str, str] | None:
+        self.guard.require(actor, "file.write")
+        found = self.find_local_file(query)
+        if found is None:
+            return None
+        source = found
+        destination_dir = source.parent
+        if target_folder:
+            destination_dir = self._personal_or_relative_folder(actor, target_folder)
+            destination_dir.mkdir(parents=True, exist_ok=True)
+        destination_name = self._safe_filename(new_name) if new_name else source.name
+        destination = self._unique_path(destination_dir / destination_name)
+        shutil.move(str(source), str(destination))
+        old_key = self._relative_key(source)
+        new_key = self._relative_key(destination)
+        version = await self._find_version_by_object_key(old_key)
+        if version is not None:
+            version.object_key = new_key
+            version.checksum = self._sha256(destination)
+            version.size_bytes = destination.stat().st_size
+            version.mime_type = mimetypes.guess_type(destination.name)[0] or version.mime_type
+            file_object = await self.session.get(FileObject, version.file_object_id)
+            if file_object is not None:
+                file_object.display_name = destination.name
+                file_object.metadata_ = {
+                    **(file_object.metadata_ or {}),
+                    "last_move_target_folder": target_folder,
+                }
+        await self.audit.record(
+            action="file.rename_or_move",
+            result="succeeded",
+            actor_employee_id=actor.id,
+            trace_id=trace_id,
+            entity_type="file",
+            entity_id=version.id if version else None,
+            tool_name="rename_or_move_file",
+            diff_summary={"old_key": old_key, "new_key": new_key},
+        )
+        await self.session.flush()
+        return {"old_key": old_key, "new_key": new_key, "path": str(destination)}
+
+    def find_local_file(self, query: str) -> Path | None:
+        words = [
+            word
+            for word in re.findall(r"[а-яА-ЯёЁa-zA-Z0-9\-\.]{3,}", query.lower())
+            if word not in {"файл", "документ", "скинь", "пришли", "отправь", "переименуй"}
+        ]
+        candidates = [
+            self.storage_root / entry
+            for entry in self.list_storage_tree(max_entries=1000)
+            if "." in Path(entry).name
+        ]
+        if words:
+            ranked = [
+                path for path in candidates if all(word in str(path).lower() for word in words[:5])
+            ]
+            if not ranked:
+                ranked = [
+                    path for path in candidates if any(word in str(path).lower() for word in words[:5])
+                ]
+            candidates = ranked
+        return candidates[0] if candidates else None
+
     async def add_file_version(
         self,
         actor: EmployeeContext,
@@ -339,6 +410,18 @@ class FileService:
     async def _scalars(self, stmt: Select[tuple[FileObject]]) -> list[FileObject]:
         rows = await self.session.scalars(stmt)
         return list(rows)
+
+    async def _find_version_by_object_key(self, object_key: str) -> FileVersion | None:
+        stmt = select(FileVersion).where(FileVersion.object_key == object_key).limit(1)
+        return await self.session.scalar(stmt)
+
+    def _personal_or_relative_folder(self, actor: EmployeeContext, target_folder: str) -> Path:
+        normalized = target_folder.strip().lower()
+        if "фото" in normalized:
+            return self.storage_root / "users" / str(actor.id) / "Мои фото"
+        if "личн" in normalized:
+            return self.storage_root / "users" / str(actor.id) / "Личные файлы"
+        return self.storage_root / self._safe_path_part(target_folder)
 
     def _entity_folder(
         self,
