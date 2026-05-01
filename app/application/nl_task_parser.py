@@ -50,8 +50,12 @@ class NaturalLanguageTaskParser:
         if not normalized:
             return []
 
+        relative_at = self._extract_relative_datetime(normalized, current)
         reminder_time = self._extract_time(normalized) or time(9, 0)
-        planned_at, ambiguous = self._extract_date(normalized, current, reminder_time)
+        if relative_at is not None:
+            planned_at, ambiguous = relative_at, False
+        else:
+            planned_at, ambiguous = self._extract_date(normalized, current, reminder_time)
         title = self._clean_title(normalized)
         return [
             ParsedTaskDraft(
@@ -80,6 +84,20 @@ class NaturalLanguageTaskParser:
             return time(hour, minute)
         return None
 
+    @staticmethod
+    def _extract_relative_datetime(text: str, now: datetime) -> datetime | None:
+        match = re.search(
+            r"\bчерез\s+(\d{1,4})\s*(минут(?:у|ы)?|мин|час(?:а|ов)?|ч)\b",
+            text.lower(),
+        )
+        if not match:
+            return None
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith(("час", "ч")):
+            return now + timedelta(hours=amount)
+        return now + timedelta(minutes=amount)
+
     def _extract_date(
         self, text: str, now: datetime, reminder_time: time
     ) -> tuple[datetime | None, bool]:
@@ -101,6 +119,11 @@ class NaturalLanguageTaskParser:
             or "следующую неделю" in lowered
         ):
             return None, True
+        if self._extract_time(text) is not None:
+            today = self._combine(now, 0, reminder_time)
+            if today > now:
+                return today, False
+            return self._combine(now, 1, reminder_time), False
         return None, True
 
     @staticmethod
@@ -120,5 +143,17 @@ class NaturalLanguageTaskParser:
         ]
         command_pattern = "|".join(commands)
         cleaned = re.sub(rf"\b({command_pattern})\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\b(сегодня|завтра|через\s+\d{1,4}\s*(?:минут(?:у|ы)?|мин|час(?:а|ов)?|ч))\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:в|к)\s*\d{1,2}(?::\d{2})?\s*(?:час(?:ов|а)?)?\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         cleaned = " ".join(cleaned.split()).strip(" ,.!;:")
         return cleaned[:300] or "Задача"

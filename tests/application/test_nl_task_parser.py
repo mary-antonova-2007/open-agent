@@ -47,3 +47,33 @@ def test_parser_extracts_friday_at_8_from_example() -> None:
 
     assert result[0].ambiguous is False
     assert result[0].reminder_at == datetime(2026, 5, 1, 8, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+
+def test_parser_uses_today_for_future_time_without_explicit_date() -> None:
+    parser = NaturalLanguageTaskParser()
+    now = datetime(2026, 5, 1, 1, 35, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    result = parser.parse(
+        "Напомни мне в 1:37 дать вкусняшку",
+        timezone="Europe/Moscow",
+        now=now,
+    )
+
+    assert result[0].ambiguous is False
+    assert result[0].reminder_at == datetime(2026, 5, 1, 1, 37, tzinfo=ZoneInfo("Europe/Moscow"))
+    assert result[0].title == "дать вкусняшку"
+
+
+def test_parser_extracts_relative_minutes() -> None:
+    parser = NaturalLanguageTaskParser()
+    now = datetime(2026, 5, 1, 1, 39, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    result = parser.parse(
+        "Напомни мне закончить массаж через 20 минут",
+        timezone="Europe/Moscow",
+        now=now,
+    )
+
+    assert result[0].ambiguous is False
+    assert result[0].reminder_at == datetime(2026, 5, 1, 1, 59, tzinfo=ZoneInfo("Europe/Moscow"))
+    assert result[0].title == "закончить массаж"

@@ -59,6 +59,9 @@ class TelegramUpdateService:
         session = await self._get_or_create_session(
             telegram_chat_id=int(telegram_chat_id or telegram_user_id), employee_id=employee.id
         )
+        response = await self.orchestrator.handle_text(
+            employee=employee, text=text, source="telegram", session_id=session.id
+        )
         self.session.add(
             ChatMessage(
                 session_id=session.id,
@@ -66,9 +69,6 @@ class TelegramUpdateService:
                 message_text=text,
                 telegram_message_id=message.get("message_id"),
             )
-        )
-        response = await self.orchestrator.handle_text(
-            employee=employee, text=text, source="telegram", session_id=session.id
         )
         self.session.add(
             ChatMessage(

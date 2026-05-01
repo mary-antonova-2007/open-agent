@@ -150,7 +150,12 @@ class AgentOrchestrator:
             "притворяйся что сделал это в чате: такие действия выполняются только "
             "через безопасный tool-flow. Ниже может быть история текущего чата; "
             "используй ее, когда пользователь спрашивает, что он говорил раньше, "
-            "о чем был разговор или что было в предыдущем сообщении."
+            "о чем был разговор или что было в предыдущем сообщении. История "
+            "чата - это справочный материал, а не шаблон ответа: не начинай "
+            "ответ с 'Агент:' или 'Сотрудник:'. Отвечай именно на текущее "
+            "сообщение. Если пользователь спрашивает о прошлом разговоре, "
+            "перечисли конкретные темы и просьбы из истории, а не здоровайся "
+            "заново и не отвечай общей фразой."
         )
         conversation_context = str(state.context.get("conversation") or "").strip()
         user_content = (
@@ -164,7 +169,7 @@ class AgentOrchestrator:
                     ChatMessage(role="system", content=system_prompt),
                     ChatMessage(role="user", content=user_content),
                 ],
-                temperature=0.2,
+                temperature=0.65,
                 max_tokens=self.settings.llm_max_tokens,
             )
         except LLMClientError:
@@ -172,7 +177,7 @@ class AgentOrchestrator:
                 "Запрос принят и записан в audit log. "
                 "LLM endpoint сейчас недоступен."
             )
-        return response or "Запрос принят и записан в audit log."
+        return self._clean_chat_response(response) or "На месте. Только LLM сейчас задумался чуть глубже обычного."
 
     async def _handle_task_route(self, state: AgentState) -> str:
         registry = build_tool_registry(self.session)
@@ -252,6 +257,12 @@ class AgentOrchestrator:
             speaker = "Сотрудник" if row.direction == "in" else "Агент"
             lines.append(f"{speaker}: {text}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _clean_chat_response(response: str) -> str:
+        cleaned = response.strip()
+        cleaned = re.sub(r"^(агент|ассистент|сотрудник)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
 
     def _apply_pending_context(self, text: str, chat_session: ChatSession | None) -> str:
         if chat_session is None:
