@@ -63,8 +63,25 @@ class AgentToolLoop:
             decision = await self._ask_for_decision(messages)
             action = decision.get("action")
             if action == "final":
+                if not tool_calls and self._requires_tool(text=text, pending_file=pending_file):
+                    messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=json.dumps(decision, ensure_ascii=False),
+                        )
+                    )
+                    messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                "Этот запрос относится к системным данным или файлам. "
+                                "Финальный ответ без tool запрещен. Выбери подходящий tool."
+                            ),
+                        )
+                    )
+                    continue
                 return ToolLoopResult(
-                    response=str(decision.get("message") or "Готово."),
+                    response=self._final_message(decision),
                     route="final",
                     tool_calls=tool_calls,
                 )
@@ -175,9 +192,13 @@ class AgentToolLoop:
             ),
         ]
         try:
-            return await self.llm.chat(final_messages, temperature=0.5, max_tokens=1200)
+            raw = await self.llm.chat(final_messages, temperature=0.5, max_tokens=1200)
         except LLMClientError:
             return "Tool выполнен, но LLM endpoint не смог сформировать красивый ответ."
+        parsed = self._parse_json(raw)
+        if parsed.get("action") == "final":
+            return self._final_message(parsed)
+        return raw
 
     @staticmethod
     def _parse_json(raw: str) -> dict[str, Any]:
@@ -193,6 +214,31 @@ class AgentToolLoop:
         except json.JSONDecodeError:
             return {"action": "final", "message": raw.strip()}
         return data if isinstance(data, dict) else {"action": "final", "message": str(data)}
+
+    @staticmethod
+    def _final_message(decision: dict[str, Any]) -> str:
+        return str(decision.get("message") or "Готово.").strip()
+
+    @staticmethod
+    def _requires_tool(*, text: str, pending_file: dict[str, Any] | None) -> bool:
+        if pending_file is not None:
+            return True
+        normalized = text.lower()
+        protected_words = (
+            "файл",
+            "диск",
+            "папк",
+            "задач",
+            "договор",
+            "проект",
+            "издел",
+            "контрагент",
+            "память",
+            "время",
+            "сколько время",
+            "который час",
+        )
+        return any(word in normalized for word in protected_words)
 
     async def _execute_tool(
         self,
