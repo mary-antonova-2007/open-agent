@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.state import AgentState
+from app.agents.tool_loop import AgentToolLoop
 from app.application.audit_service import AuditService
 from app.application.entity_service import EntityService
 from app.application.file_service import FileService
@@ -56,15 +57,17 @@ class AgentOrchestrator:
                 "pending_file": pending_file,
             },
         )
-        state.context["intent"] = await self._decide_intent(state)
-        if self._is_pending_file_instruction(state) or self._is_file_list_request(state.text):
-            state.context["intent"] = {
-                **state.context["intent"],
-                "route": "file_action",
-                "reason": "file_workflow_guard",
-            }
-        state.route = str(state.context["intent"].get("route") or "chat")
-        state.response = await self._response_for_route(state)
+        loop_result = await AgentToolLoop(self.session).run(
+            employee=employee,
+            text=text,
+            conversation=conversation_context,
+            current_time=state.context["current_time"],
+            pending_file=pending_file,
+            trace_id=state.trace_id,
+        )
+        state.route = loop_result.route
+        state.response = loop_result.response
+        state.context["tool_calls"] = loop_result.tool_calls
         self._update_session_state(
             chat_session=chat_session,
             state=state,
@@ -87,7 +90,11 @@ class AgentOrchestrator:
             actor_employee_id=employee.id,
             trace_id=state.trace_id,
             tool_name=None,
-            diff_summary={"route": state.route, "source": source},
+            diff_summary={
+                "route": state.route,
+                "source": source,
+                "tool_calls": state.context.get("tool_calls", []),
+            },
         )
         return state.response
 
@@ -941,5 +948,17 @@ class AgentOrchestrator:
             }
         elif state.context.get("task_created") or state.route != "chat":
             current_state.pop("pending_task", None)
+        if self._pending_file_was_processed(state):
+            current_state.pop("pending_file", None)
         current_state["last_user_text"] = original_text
         chat_session.state = current_state
+
+    @staticmethod
+    def _pending_file_was_processed(state: AgentState) -> bool:
+        for call in state.context.get("tool_calls", []):
+            if call.get("tool") != "classify_and_move_pending_file":
+                continue
+            result = call.get("result") or {}
+            if result.get("ok"):
+                return True
+        return False
