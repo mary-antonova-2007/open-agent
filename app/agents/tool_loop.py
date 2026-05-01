@@ -25,6 +25,7 @@ class ToolLoopResult:
     response: str
     route: str
     tool_calls: list[dict[str, Any]]
+    context_updates: dict[str, Any] | None = None
 
 
 class AgentToolLoop:
@@ -41,6 +42,7 @@ class AgentToolLoop:
         conversation: str,
         current_time: dict[str, str],
         pending_file: dict[str, Any] | None,
+        last_file_query: str | None = None,
         trace_id: str,
     ) -> ToolLoopResult:
         messages = [
@@ -51,6 +53,7 @@ class AgentToolLoop:
                     f"employee={employee.model_dump(mode='json')}\n"
                     f"current_time={current_time}\n"
                     f"pending_file={pending_file}\n"
+                    f"last_file_query={last_file_query}\n"
                     f"conversation_history:\n{conversation or 'empty'}\n\n"
                     f"user_message: {text}"
                 ),
@@ -84,6 +87,7 @@ class AgentToolLoop:
                     response=self._final_message(decision),
                     route="final",
                     tool_calls=tool_calls,
+                    context_updates=self._context_updates_from_result(last_tool_result),
                 )
             if action != "tool":
                 return await self._fallback_chat(messages, tool_calls)
@@ -96,6 +100,7 @@ class AgentToolLoop:
                 employee=employee,
                 text=text,
                 pending_file=pending_file,
+                last_file_query=last_file_query,
                 current_time=current_time,
                 trace_id=trace_id,
             )
@@ -107,6 +112,7 @@ class AgentToolLoop:
                     response=f"__SEND_FILE__:{result['send_file_path']}\n{result.get('caption') or ''}",
                     route="tool",
                     tool_calls=tool_calls,
+                    context_updates={"last_file_query": result.get("caption")},
                 )
             if tool_name in {"rename_or_move_file", "classify_and_move_pending_file"} and result.get("ok"):
                 return ToolLoopResult(
@@ -116,6 +122,7 @@ class AgentToolLoop:
                     ),
                     route="tool",
                     tool_calls=tool_calls,
+                    context_updates={"last_file_query": result.get("new_key") or result.get("object_key")},
                 )
             messages.append(
                 ChatMessage(
@@ -142,6 +149,7 @@ class AgentToolLoop:
                 response=await self._final_from_tool_result(messages),
                 route="tool",
                 tool_calls=tool_calls,
+                context_updates=self._context_updates_from_result(last_tool_result),
             )
         return await self._fallback_chat(messages, tool_calls)
 
@@ -231,6 +239,15 @@ class AgentToolLoop:
         return str(decision.get("message") or "Готово.").strip()
 
     @staticmethod
+    def _context_updates_from_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not result:
+            return None
+        last_file_query = result.get("last_file_query")
+        if last_file_query:
+            return {"last_file_query": last_file_query}
+        return None
+
+    @staticmethod
     def _requires_tool(*, text: str, pending_file: dict[str, Any] | None) -> bool:
         if pending_file is not None:
             return True
@@ -259,6 +276,7 @@ class AgentToolLoop:
         employee: EmployeeContext,
         text: str,
         pending_file: dict[str, Any] | None,
+        last_file_query: str | None,
         current_time: dict[str, str],
         trace_id: str,
     ) -> dict[str, Any]:
@@ -269,6 +287,7 @@ class AgentToolLoop:
                 employee=employee,
                 text=text,
                 pending_file=pending_file,
+                last_file_query=last_file_query,
                 current_time=current_time,
                 trace_id=trace_id,
             )
@@ -285,6 +304,7 @@ class AgentToolLoop:
         employee: EmployeeContext,
         text: str,
         pending_file: dict[str, Any] | None,
+        last_file_query: str | None,
         current_time: dict[str, str],
         trace_id: str,
     ) -> dict[str, Any]:
@@ -300,9 +320,12 @@ class AgentToolLoop:
             return {"ok": True, "entries": file_service.list_storage_tree(max_entries=300)}
         if tool_name == "search_files":
             query = str(args.get("query") or "")
-            return {"ok": True, "files": self._search_files(file_service, query)}
+            files = self._search_files(file_service, query)
+            return {"ok": True, "files": files, "last_file_query": files[0] if files else None}
         if tool_name == "send_file":
             query = str(args.get("query") or text)
+            if self._is_file_pronoun_query(query):
+                query = str(args.get("last_file_query") or last_file_query or "")
             found = self._find_file(file_service, query)
             if found is None:
                 return {"ok": False, "error": "not_found"}
@@ -496,6 +519,12 @@ class AgentToolLoop:
                     "entity_id": rows[0].id,
                     "project_title": rows[0].title,
                 }
+        if any(classification.get(key) for key in ("project", "contract", "contract_number", "item")):
+            msg = (
+                "Не нашел в базе проект/договор/изделие для файла. "
+                "Нужно сначала создать сущность или уточнить название."
+            )
+            raise ValueError(msg)
         return {"entity_type": EntityType.personal, "entity_id": employee.id, "project_title": "Личные файлы"}
 
     @staticmethod
@@ -527,6 +556,13 @@ class AgentToolLoop:
             for word in re.findall(r"[а-яА-ЯёЁa-zA-Z0-9\-]{3,}", query.lower())
             if word not in stop
         ]
+
+    @staticmethod
+    def _is_file_pronoun_query(query: str) -> bool:
+        normalized = query.lower().strip()
+        return normalized in {"его", "ее", "её", "этот файл", "скинь его", "пришли его"} or (
+            "скинь" in normalized and "его" in normalized
+        )
 
     @staticmethod
     def _build_document_filename(classification: dict[str, Any]) -> str:

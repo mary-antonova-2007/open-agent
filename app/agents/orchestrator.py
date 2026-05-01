@@ -63,11 +63,16 @@ class AgentOrchestrator:
             conversation=conversation_context,
             current_time=state.context["current_time"],
             pending_file=pending_file,
+            last_file_query=(chat_session.state or {}).get("last_file_query")
+            if chat_session
+            else None,
             trace_id=state.trace_id,
         )
         state.route = loop_result.route
         state.response = loop_result.response
         state.context["tool_calls"] = loop_result.tool_calls
+        if loop_result.context_updates:
+            state.context["context_updates"] = loop_result.context_updates
         self._update_session_state(
             chat_session=chat_session,
             state=state,
@@ -950,6 +955,7 @@ class AgentOrchestrator:
             current_state.pop("pending_task", None)
         if self._pending_file_was_processed(state):
             current_state.pop("pending_file", None)
+        current_state.update(state.context.get("context_updates") or {})
         current_state["last_user_text"] = original_text
         chat_session.state = current_state
 
