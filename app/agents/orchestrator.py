@@ -373,9 +373,16 @@ class AgentOrchestrator:
             "перечисли конкретные темы и просьбы из истории, а не здоровайся "
             "заново и не отвечай общей фразой. По умолчанию отвечай компактно: "
             "1-5 коротких абзацев или до 8 пунктов списка, если пользователь "
-            "сам не просит подробный разбор."
+            "сам не просит подробный разбор. Последнее сообщение пользователя "
+            "важнее истории: история нужна только как фон. Не отвечай на старые "
+            "вопросы из истории, если текущее сообщение их не повторяет. Если "
+            "пользователь просто спрашивает, как ты, отвечай как живой помощник, "
+            "а не делай выводы о времени, задачах или предыдущих ошибках."
         )
-        conversation_context = str(state.context.get("conversation") or "").strip()
+        conversation_context = self._recent_conversation_lines(
+            str(state.context.get("conversation") or ""),
+            limit=24,
+        )
         user_content = (
             f"Сотрудник: {state.employee.full_name}.\n"
             f"История текущего чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
@@ -489,6 +496,11 @@ class AgentOrchestrator:
             flags=re.IGNORECASE,
         )
         return cleaned.strip()
+
+    @staticmethod
+    def _recent_conversation_lines(conversation_context: str, *, limit: int) -> str:
+        lines = [line for line in conversation_context.strip().splitlines() if line.strip()]
+        return "\n".join(lines[-limit:])
 
     @staticmethod
     def _extract_entity_query(text: str) -> str:
