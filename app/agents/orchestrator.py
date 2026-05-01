@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -45,7 +46,8 @@ class AgentOrchestrator:
             trace_id=uuid.uuid4().hex,
             context={"conversation": conversation_context},
         )
-        state.route = self._route(text)
+        state.context["intent"] = await self._decide_intent(state)
+        state.route = str(state.context["intent"].get("route") or "chat")
         state.response = await self._response_for_route(state)
         self._update_session_state(
             chat_session=chat_session,
@@ -73,70 +75,79 @@ class AgentOrchestrator:
         )
         return state.response
 
+    async def _decide_intent(self, state: AgentState) -> dict:
+        conversation_context = str(state.context.get("conversation") or "").strip()
+        system_prompt = (
+            "Ты intent planner внутреннего Telegram AI Agent. "
+            "Твоя задача - понять последнее сообщение сотрудника и вернуть только JSON, "
+            "без markdown и без пояснений. Ты не выполняешь действие сам, а выбираешь "
+            "безопасный route/tool для backend.\n\n"
+            "Доступные route:\n"
+            "- chat: обычный разговор или общий вопрос\n"
+            "- conversation_memory: вопрос о текущей истории чата\n"
+            "- task: создать задачу/напоминание из естественного языка\n"
+            "- task_list: показать открытые задачи сотрудника\n"
+            "- entity: поиск/показ CRM-сущностей или памяти сущности\n"
+            "- knowledge: вопрос по регламентам/документам/базе знаний\n\n"
+            "Для route=entity выбери tool_name:\n"
+            "- search_counterparties\n"
+            "- search_projects\n"
+            "- search_contracts\n"
+            "- search_items\n"
+            "- get_project_memory\n"
+            "- get_contract_memory\n\n"
+            "Поле query - поисковая строка без служебных слов. Если сотрудник просит "
+            "'все договоры' или 'какие есть договоры', query должен быть пустой строкой. "
+            "Для обычного разговора query пустой. Верни JSON строго такого вида: "
+            "{\"route\":\"...\",\"tool_name\":null,\"query\":\"\",\"reason\":\"...\"}."
+        )
+        user_content = (
+            f"Сотрудник: {state.employee.full_name}\n"
+            f"История чата:\n{conversation_context or 'Истории пока нет.'}\n\n"
+            f"Последнее сообщение: {state.text}"
+        )
+        try:
+            raw = await self.llm_client.chat(
+                [
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=user_content),
+                ],
+                temperature=0,
+                max_tokens=500,
+            )
+            intent = self._parse_intent_json(raw)
+        except LLMClientError:
+            return {"route": "chat", "tool_name": None, "query": "", "reason": "llm_unavailable"}
+        if intent["route"] not in {
+            "chat",
+            "conversation_memory",
+            "task",
+            "task_list",
+            "entity",
+            "knowledge",
+        }:
+            intent["route"] = "chat"
+        return intent
+
     @staticmethod
-    def _route(text: str) -> str:
-        normalized = text.lower()
-        if any(
-            phrase in normalized
-            for phrase in (
-                "помнишь бесед",
-                "помнишь разговор",
-                "о чем мы",
-                "о чём мы",
-                "что я сказал",
-                "что я спрашивал",
-                "о чем просил",
-                "о чём просил",
-                "что было",
-                "сообщение назад",
-                "предыдущее сообщение",
-            )
-        ):
-            return "conversation_memory"
-        if any(
-            phrase in normalized
-            for phrase in (
-                "что я должен сделать",
-                "что мне сделать",
-                "мои задачи",
-                "список задач",
-                "покажи задачи",
-                "покажи мои задачи",
-                "какие задачи",
-                "какие у меня задачи",
-                "что у меня",
-                "что напоминал",
-                "что я просил",
-                "просил напомнить",
-            )
-        ):
-            return "task_list"
-        if re.search(
-            r"\b(напомни( мне)?|создай задачу|поставь задачу|запланируй)\b",
-            normalized,
-        ):
-            return "task"
-        if any(
-            word in normalized
-            for word in (
-                "контрагент",
-                "клиент",
-                "поставщик",
-                "подрядчик",
-                "проект",
-                "договор",
-                "издел",
-                "память проекта",
-                "память договора",
-            )
-        ):
-            return "entity"
-        if any(
-            word in normalized
-            for word in ("регламент", "инструкц", "документ")
-        ):
-            return "knowledge"
-        return "chat"
+    def _parse_intent_json(raw: str) -> dict:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+            cleaned = re.sub(r"```$", "", cleaned).strip()
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match:
+            cleaned = match.group(0)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {"route": "chat", "tool_name": None, "query": "", "reason": "invalid_json"}
+        return {
+            "route": str(data.get("route") or "chat"),
+            "tool_name": data.get("tool_name"),
+            "query": str(data.get("query") or "").strip(),
+            "reason": str(data.get("reason") or ""),
+        }
 
     async def _response_for_route(self, state: AgentState) -> str:
         if state.route == "task":
@@ -208,12 +219,11 @@ class AgentOrchestrator:
 
     async def _handle_entity_route(self, state: AgentState) -> str:
         registry = build_tool_registry(self.session)
-        normalized = state.text.lower()
-        query = self._extract_entity_query(state.text)
+        intent = state.context.get("intent") or {}
+        tool_name = intent.get("tool_name")
+        query = str(intent.get("query") or "").strip()
         try:
-            if "память договора" in normalized or (
-                "память" in normalized and "договор" in normalized
-            ):
+            if tool_name == "get_contract_memory":
                 return await self._search_and_format_memory(
                     registry=registry,
                     state=state,
@@ -223,9 +233,7 @@ class AgentOrchestrator:
                     entity_label="договор",
                     query=query,
                 )
-            if "память проекта" in normalized or (
-                "память" in normalized and "проект" in normalized
-            ):
+            if tool_name == "get_project_memory":
                 return await self._search_and_format_memory(
                     registry=registry,
                     state=state,
@@ -235,7 +243,7 @@ class AgentOrchestrator:
                     entity_label="проект",
                     query=query,
                 )
-            if "договор" in normalized:
+            if tool_name == "search_contracts":
                 result = await registry.execute(
                     name="search_contracts",
                     actor=state.employee,
@@ -247,7 +255,7 @@ class AgentOrchestrator:
                     result.data.get("contracts", []) if result.ok else [],
                     ("id", "number", "title", "status", "project_id", "counterparty_id"),
                 )
-            if "проект" in normalized:
+            if tool_name == "search_projects":
                 result = await registry.execute(
                     name="search_projects",
                     actor=state.employee,
@@ -259,7 +267,7 @@ class AgentOrchestrator:
                     result.data.get("projects", []) if result.ok else [],
                     ("id", "title", "status", "responsible_id", "primary_counterparty_id"),
                 )
-            if "издел" in normalized:
+            if tool_name == "search_items":
                 result = await registry.execute(
                     name="search_items",
                     actor=state.employee,
@@ -271,6 +279,8 @@ class AgentOrchestrator:
                     result.data.get("items", []) if result.ok else [],
                     ("id", "name", "type", "status", "contract_id"),
                 )
+            if tool_name not in {None, "", "search_counterparties"}:
+                return "Я понял, что нужен доступ к базе, но не смог выбрать подходящий безопасный tool."
             result = await registry.execute(
                 name="search_counterparties",
                 actor=state.employee,
@@ -484,7 +494,9 @@ class AgentOrchestrator:
     def _extract_entity_query(text: str) -> str:
         cleaned = text.lower()
         cleaned = re.sub(
-            r"\b(найди|покажи|открой|дай|расскажи|про|по|память|список|все|всех|мои|мой|мою)\b",
+            r"\b(найди|покажи|открой|дай|расскажи|про|по|память|список|"
+            r"все|всех|вся|всю|какие|какой|какая|есть|имеются|существуют|"
+            r"мои|мой|мою)\b",
             " ",
             cleaned,
             flags=re.IGNORECASE,
