@@ -84,6 +84,35 @@ class EntityMemoryService:
         )
         return row.id
 
+    async def append_contract_note(
+        self,
+        actor: EmployeeContext,
+        contract_id: int,
+        note: str,
+        *,
+        trace_id: str | None = None,
+    ) -> int:
+        self.guard.require(actor, "memory.note.append")
+        row = EntityNote(
+            entity_type="contract",
+            entity_id=contract_id,
+            author_id=actor.id,
+            note=note,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        await self.audit.record(
+            action="memory.contract.note.append",
+            result="succeeded",
+            actor_employee_id=actor.id,
+            trace_id=trace_id,
+            entity_type="contract",
+            entity_id=contract_id,
+            tool_name="append_contract_note",
+            diff_summary={"note_id": row.id},
+        )
+        return row.id
+
     async def get_contract_memory(
         self, actor: EmployeeContext, contract_id: int
     ) -> dict[str, str | None]:

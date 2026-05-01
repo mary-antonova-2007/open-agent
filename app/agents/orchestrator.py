@@ -118,6 +118,21 @@ class AgentOrchestrator:
             return "task"
         if any(
             word in normalized
+            for word in (
+                "контрагент",
+                "клиент",
+                "поставщик",
+                "подрядчик",
+                "проект",
+                "договор",
+                "изделие",
+                "память проекта",
+                "память договора",
+            )
+        ):
+            return "entity"
+        if any(
+            word in normalized
             for word in ("регламент", "инструкц", "документ")
         ):
             return "knowledge"
@@ -130,6 +145,8 @@ class AgentOrchestrator:
             return await self._handle_task_list_route(state)
         if state.route == "conversation_memory":
             return await self._handle_conversation_memory_route(state)
+        if state.route == "entity":
+            return await self._handle_entity_route(state)
         if state.route == "knowledge":
             return (
                 "Вопрос по базе знаний распознан. RAG будет "
@@ -188,6 +205,124 @@ class AgentOrchestrator:
         except LLMClientError:
             return "Историю вижу, но LLM endpoint сейчас недоступен для нормального резюме."
         return self._clean_chat_response(response) or "Историю вижу, но внятный ответ сейчас не собрал."
+
+    async def _handle_entity_route(self, state: AgentState) -> str:
+        registry = build_tool_registry(self.session)
+        normalized = state.text.lower()
+        query = self._extract_entity_query(state.text)
+        try:
+            if "память договора" in normalized or (
+                "память" in normalized and "договор" in normalized
+            ):
+                return await self._search_and_format_memory(
+                    registry=registry,
+                    state=state,
+                    search_tool="search_contracts",
+                    memory_tool="get_contract_memory",
+                    collection_key="contracts",
+                    entity_label="договор",
+                    query=query,
+                )
+            if "память проекта" in normalized or (
+                "память" in normalized and "проект" in normalized
+            ):
+                return await self._search_and_format_memory(
+                    registry=registry,
+                    state=state,
+                    search_tool="search_projects",
+                    memory_tool="get_project_memory",
+                    collection_key="projects",
+                    entity_label="проект",
+                    query=query,
+                )
+            if "договор" in normalized:
+                result = await registry.execute(
+                    name="search_contracts",
+                    actor=state.employee,
+                    payload={"query": query},
+                    trace_id=state.trace_id,
+                )
+                return self._format_search_results(
+                    "договоры",
+                    result.data.get("contracts", []) if result.ok else [],
+                    ("id", "number", "title", "status", "project_id", "counterparty_id"),
+                )
+            if "проект" in normalized:
+                result = await registry.execute(
+                    name="search_projects",
+                    actor=state.employee,
+                    payload={"query": query},
+                    trace_id=state.trace_id,
+                )
+                return self._format_search_results(
+                    "проекты",
+                    result.data.get("projects", []) if result.ok else [],
+                    ("id", "title", "status", "responsible_id", "primary_counterparty_id"),
+                )
+            if "издел" in normalized:
+                result = await registry.execute(
+                    name="search_items",
+                    actor=state.employee,
+                    payload={"query": query},
+                    trace_id=state.trace_id,
+                )
+                return self._format_search_results(
+                    "изделия",
+                    result.data.get("items", []) if result.ok else [],
+                    ("id", "name", "type", "status", "contract_id"),
+                )
+            result = await registry.execute(
+                name="search_counterparties",
+                actor=state.employee,
+                payload={"query": query},
+                trace_id=state.trace_id,
+            )
+            return self._format_search_results(
+                "контрагенты",
+                result.data.get("counterparties", []) if result.ok else [],
+                ("id", "name", "type", "notes"),
+            )
+        except PermissionDeniedError:
+            return "Нет прав на просмотр этих данных."
+
+    async def _search_and_format_memory(
+        self,
+        *,
+        registry,
+        state: AgentState,
+        search_tool: str,
+        memory_tool: str,
+        collection_key: str,
+        entity_label: str,
+        query: str,
+    ) -> str:
+        search = await registry.execute(
+            name=search_tool,
+            actor=state.employee,
+            payload={"query": query},
+            trace_id=state.trace_id,
+        )
+        rows = search.data.get(collection_key, []) if search.ok else []
+        if not rows:
+            return f"Не нашел {entity_label} по запросу «{query or 'все'}»."
+        if len(rows) > 1:
+            return (
+                f"Нашел несколько вариантов, уточни {entity_label}:\n"
+                + "\n".join(
+                    f"{index}. #{row.get('id')} {row.get('title') or row.get('name')}"
+                    for index, row in enumerate(rows[:10], start=1)
+                )
+            )
+        row = rows[0]
+        memory = await registry.execute(
+            name=memory_tool,
+            actor=state.employee,
+            payload={"id": row["id"]},
+            trace_id=state.trace_id,
+        )
+        if not memory.ok:
+            return f"{entity_label.capitalize()} найден, но память по нему пока пустая."
+        return self._format_memory(entity_label, row, memory.data)
 
     async def _handle_chat_route(self, state: AgentState) -> str:
         system_prompt = (
@@ -341,6 +476,64 @@ class AgentOrchestrator:
             flags=re.IGNORECASE,
         )
         return cleaned.strip()
+
+    @staticmethod
+    def _extract_entity_query(text: str) -> str:
+        cleaned = text.lower()
+        cleaned = re.sub(
+            r"\b(найди|покажи|открой|дай|расскажи|про|по|память|список|все|всех|мои|мой|мою)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(контрагент[а-я]*|клиент[а-я]*|поставщик[а-я]*|подрядчик[а-я]*|"
+            r"проект[а-я]*|договор[а-я]*|издели[а-я]*)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"[^\wа-яА-ЯёЁ0-9\- ]+", " ", cleaned)
+        return " ".join(cleaned.split())
+
+    @staticmethod
+    def _format_search_results(
+        label: str,
+        rows: list[dict],
+        fields: tuple[str, ...],
+    ) -> str:
+        if not rows:
+            return f"В базе пока не нашел подходящие {label}. Нечего показать, кроме честности."
+        lines = [f"Нашел {label}:"]
+        for index, row in enumerate(rows[:10], start=1):
+            parts = []
+            for field in fields:
+                value = row.get(field)
+                if value not in (None, "", [], {}):
+                    parts.append(f"{field}: {value}")
+            lines.append(f"{index}. " + "; ".join(parts))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_memory(entity_label: str, row: dict, memory: dict) -> str:
+        title = row.get("title") or row.get("name") or f"#{row.get('id')}"
+        labels = {
+            "summary": "Кратко",
+            "notes": "Заметки",
+            "current_issues": "Текущие вопросы",
+            "current_risks": "Риски",
+            "important_facts": "Важные факты",
+        }
+        lines = [f"Память: {entity_label} «{title}»"]
+        has_data = False
+        for key, label in labels.items():
+            value = memory.get(key)
+            if value:
+                has_data = True
+                lines.append(f"{label}: {value}")
+        if not has_data:
+            lines.append("Пока пусто. Отличный минимализм, но пользы маловато.")
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_employee_messages(conversation_context: str) -> list[str]:

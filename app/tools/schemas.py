@@ -13,7 +13,7 @@ class EmptyInput(BaseModel):
 
 
 class SearchInput(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = ""
     filters: dict[str, Any] = Field(default_factory=dict)
 
 

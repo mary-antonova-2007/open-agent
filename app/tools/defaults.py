@@ -135,6 +135,36 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
         )
         return ToolResult(ok=True, data={"note_id": note_id})
 
+    async def get_contract_memory(
+        actor: EmployeeContext, payload: EntityIdInput, _trace_id: str | None
+    ) -> ToolResult:
+        data = await memory_service.get_contract_memory(actor, payload.id)
+        return ToolResult(ok=bool(data), code="ok" if data else "not_found", data=data)
+
+    async def update_contract_memory(
+        actor: EmployeeContext, payload: MemoryPatchInput, trace_id: str | None
+    ) -> ToolResult:
+        data = await memory_service.update_contract_memory(
+            actor,
+            payload.entity_id,
+            MemoryPatch(
+                summary=payload.summary,
+                notes=payload.notes,
+                current_risks=payload.current_risks,
+                important_facts=payload.important_facts,
+            ),
+            trace_id=trace_id,
+        )
+        return ToolResult(ok=bool(data), code="ok" if data else "not_found", data=data)
+
+    async def append_contract_note(
+        actor: EmployeeContext, payload: AppendNoteInput, trace_id: str | None
+    ) -> ToolResult:
+        note_id = await memory_service.append_contract_note(
+            actor, payload.entity_id, payload.note, trace_id=trace_id
+        )
+        return ToolResult(ok=True, data={"note_id": note_id})
+
     async def search_counterparties(
         actor: EmployeeContext, payload: SearchInput, _trace_id: str | None
     ) -> ToolResult:
@@ -286,6 +316,30 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
             "memory.note.append",
             DangerLevel.safe,
             append_project_note,
+        ),
+        ToolDefinition(
+            "get_contract_memory",
+            "Read structured contract memory.",
+            EntityIdInput,
+            "contract.read",
+            DangerLevel.safe,
+            get_contract_memory,
+        ),
+        ToolDefinition(
+            "update_contract_memory",
+            "Update structured contract memory fields.",
+            MemoryPatchInput,
+            "memory.update",
+            DangerLevel.dangerous,
+            update_contract_memory,
+        ),
+        ToolDefinition(
+            "append_contract_note",
+            "Append an operational note to a contract.",
+            AppendNoteInput,
+            "memory.note.append",
+            DangerLevel.safe,
+            append_contract_note,
         ),
         ToolDefinition(
             "search_counterparties",
