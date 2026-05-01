@@ -57,6 +57,12 @@ class AgentOrchestrator:
             },
         )
         state.context["intent"] = await self._decide_intent(state)
+        if self._is_pending_file_instruction(state):
+            state.context["intent"] = {
+                **state.context["intent"],
+                "route": "file_action",
+                "reason": "pending_file_workflow_guard",
+            }
         state.route = str(state.context["intent"].get("route") or "chat")
         state.response = await self._response_for_route(state)
         self._update_session_state(
@@ -173,6 +179,28 @@ class AgentOrchestrator:
             "query": str(data.get("query") or "").strip(),
             "reason": str(data.get("reason") or ""),
         }
+
+    @staticmethod
+    def _is_pending_file_instruction(state: AgentState) -> bool:
+        if not state.context.get("pending_file"):
+            return False
+        normalized = state.text.lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "это ",
+                "это договор",
+                "это файл",
+                "это документ",
+                "положи",
+                "сохрани",
+                "перемести",
+                "кдз",
+                "кдп",
+                "замер",
+                "модель",
+            )
+        )
 
     async def _response_for_route(self, state: AgentState) -> str:
         if state.route == "task":
