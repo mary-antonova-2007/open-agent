@@ -144,6 +144,15 @@ class NaturalLanguageTaskParser:
         command_pattern = "|".join(commands)
         cleaned = re.sub(rf"\b({command_pattern})\b", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(
+            r"\bпо\s+(?:договору|проекту|объекту)\s+"
+            r"[а-яА-ЯёЁa-zA-Z0-9\-\s]{1,80}?"
+            r"(?=\b(?:сегодня|завтра|через|в\s+\d|на\s+следующ|"
+            r"провер|сдел|созвон|позвон|съезд|законч|дать)\b)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
             r"\b(сегодня|завтра|через\s+\d{1,4}\s*(?:минут(?:у|ы)?|мин|час(?:а|ов)?|ч))\b",
             "",
             cleaned,

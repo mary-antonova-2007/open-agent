@@ -77,3 +77,17 @@ def test_parser_extracts_relative_minutes() -> None:
     assert result[0].ambiguous is False
     assert result[0].reminder_at == datetime(2026, 5, 1, 1, 59, tzinfo=ZoneInfo("Europe/Moscow"))
     assert result[0].title == "закончить массаж"
+
+
+def test_parser_removes_related_contract_phrase_from_title() -> None:
+    parser = NaturalLanguageTaskParser()
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    result = parser.parse(
+        "Напомни мне по договору Жуковка 35 завтра в 10 проверить замер",
+        timezone="Europe/Moscow",
+        now=now,
+    )
+
+    assert result[0].ambiguous is False
+    assert result[0].title == "проверить замер"
