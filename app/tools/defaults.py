@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.entity_service import EntityService
@@ -8,7 +10,7 @@ from app.application.memory_service import EntityMemoryService
 from app.application.nl_task_parser import NaturalLanguageTaskParser
 from app.application.schemas import EmployeeContext, MemoryPatch, TaskCreate, ToolResult
 from app.application.task_service import TaskService
-from app.domain.enums import DangerLevel
+from app.domain.enums import DangerLevel, EntityType
 from app.tools.registry import ToolDefinition, ToolRegistry
 from app.tools.schemas import (
     AppendNoteInput,
@@ -75,6 +77,17 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
                 data={"drafts": [draft.__dict__ for draft in drafts]},
                 message="Need clarification for date or task details",
             )
+        related_entity_type = payload.related_entity_type
+        related_entity_id = payload.related_entity_id
+        resolved_entity = await _resolve_related_entity(
+            entity_service=entity_service,
+            actor=actor,
+            text=payload.text,
+            explicit_type=related_entity_type,
+            explicit_id=related_entity_id,
+        )
+        if resolved_entity is not None:
+            related_entity_type, related_entity_id = resolved_entity
         created = []
         for draft in drafts:
             task = await task_service.create_task(
@@ -84,8 +97,8 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
                     assignee_id=payload.assignee_id or actor.id,
                     title=draft.title,
                     description=draft.description,
-                    related_entity_type=payload.related_entity_type,
-                    related_entity_id=payload.related_entity_id,
+                    related_entity_type=related_entity_type,
+                    related_entity_id=related_entity_id,
                     due_at=draft.due_at,
                     planned_at=draft.planned_at,
                     reminder_at=draft.reminder_at,
@@ -446,3 +459,49 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
             )
         )
     return registry
+
+
+async def _resolve_related_entity(
+    *,
+    entity_service: EntityService,
+    actor: EmployeeContext,
+    text: str,
+    explicit_type: EntityType | None,
+    explicit_id: int | None,
+) -> tuple[EntityType, int] | None:
+    if explicit_type is not None and explicit_id is not None:
+        return explicit_type, explicit_id
+
+    contract_query = _extract_after_keyword(text, ("договор", "договору", "контракт"))
+    if contract_query:
+        contracts = await entity_service.search_contracts(actor, contract_query, limit=2)
+        if len(contracts) == 1:
+            return EntityType.contract, contracts[0].id
+
+    project_query = _extract_after_keyword(text, ("проект", "проекту", "объект", "объекту"))
+    if project_query:
+        projects = await entity_service.search_projects(actor, project_query, limit=2)
+        if len(projects) == 1:
+            return EntityType.project, projects[0].id
+
+    return None
+
+
+def _extract_after_keyword(text: str, keywords: tuple[str, ...]) -> str:
+    normalized = " ".join(text.strip().split())
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    match = re.search(
+        rf"\b(?:{keyword_pattern})\s+([а-яА-ЯёЁa-zA-Z0-9][а-яА-ЯёЁa-zA-Z0-9\-\s]{{1,80}})",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    candidate = match.group(1)
+    candidate = re.split(
+        r"\b(сегодня|завтра|через|в\s+\d|на\s+следующ|созвон|съезд|позвон|напомни)\b",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return " ".join(candidate.split()).strip(" ,.!?:;")

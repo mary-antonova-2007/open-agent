@@ -404,9 +404,12 @@ class AgentOrchestrator:
             if len(tasks) == 1:
                 title = tasks[0].get("title", "задача")
                 reminder = tasks[0].get("reminder_at")
+                entity_type = tasks[0].get("related_entity_type")
+                entity_id = tasks[0].get("related_entity_id")
+                entity = f" Привязал к {entity_type} #{entity_id}." if entity_type and entity_id else ""
                 if reminder:
-                    return f"Создал задачу: {title}. Напоминание: {reminder}."
-                return f"Создал задачу: {title}."
+                    return f"Создал задачу: {title}.{entity} Напоминание: {reminder}."
+                return f"Создал задачу: {title}.{entity}"
             return f"Создал задач: {len(tasks)}."
         if result.code == "ambiguous":
             state.context["task_ambiguous"] = True

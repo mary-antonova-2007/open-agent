@@ -40,6 +40,8 @@ class TaskRead(BaseModel):
     id: int
     creator_id: int
     assignee_id: int
+    related_entity_type: str | None
+    related_entity_id: int | None
     title: str
     description: str | None
     status: str
